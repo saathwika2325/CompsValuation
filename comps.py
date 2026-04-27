@@ -45,12 +45,9 @@ GLOBAL_UNIVERSE = sorted(list(set([t for sub in STOCK_UNIVERSES.values() for t i
 @st.cache_data(ttl=86400)
 def get_global_sector_map(universe):
     ind_map, sec_map, industry_lookup = {}, {}, {}
-    # CLOUD OPTIMIZATION: On deployed apps, looping 100 times to call .info is risky.
-    # We use a progress bar so the user knows why it's slow.
-    progress_bar = st.progress(0)
+    progress_bar = st.progress(0, text="Optimizing Sector Maps for Cloud...")
     for i, ticker in enumerate(universe):
         try:
-            # We fetch a subset of info to reduce bandwidth
             t_obj = yf.Ticker(ticker)
             info = t_obj.info
             ind, sec = info.get('industry', 'Other'), info.get('sector', 'Other')
@@ -66,16 +63,13 @@ def get_global_sector_map(universe):
 def get_valuation_data(ticker):
     try:
         stock = yf.Ticker(ticker)
-        # Use history for price as it's more reliable in the cloud
         hist = stock.history(period="1d")
         info = stock.info
         
         if hist.empty and not info: return None
 
-        # ROE Robust Extraction
         roe = info.get('returnOnEquity') or info.get('trailingReturnOnEquity') or info.get('forwardReturnOnEquity')
 
-        # Fallback Math: ROE = Net Income / Equity
         if roe is None:
             try:
                 ni = info.get('netIncomeToCommon') or info.get('netIncome')
@@ -83,15 +77,14 @@ def get_valuation_data(ticker):
                 mcap = info.get('marketCap')
                 if ni and pb and mcap and pb != 0:
                     equity = mcap / pb
-                    if equity != 0:
-                        roe = ni / equity
+                    if equity != 0: roe = ni / equity
             except:
                 pass
 
         return {
             "Ticker": ticker, "Name": info.get('shortName', ticker),
             "Description": info.get('longBusinessSummary', "No description available."),
-            "Price": info.get('currentPrice') or info.get('previousClose') or hist['Close'].iloc[-1],
+            "Price": info.get('currentPrice') or info.get('previousClose') or (hist['Close'].iloc[-1] if not hist.empty else 0),
             "P/E": info.get('forwardPE') or info.get('trailingPE'),
             "P/S": info.get('priceToSalesTrailing12Months') or info.get('priceToSales'),
             "P/B": info.get('priceToBook'),
@@ -106,7 +99,7 @@ def get_valuation_data(ticker):
             "Sector": info.get('sector', 'Other'), "Market Cap": info.get('marketCap'),
             "SharesOut": info.get('sharesOutstanding')
         }
-    except Exception as e:
+    except:
         return None
 
 # --- UI Header ---
@@ -136,7 +129,6 @@ with tab1:
     """)
 
 with tab2:
-    # On first run in cloud, this might take time. We wrap in a spinner.
     with st.spinner("Initializing Sector Maps..."):
         ind_map, sec_map, ind_lookup = get_global_sector_map(GLOBAL_UNIVERSE)
         
@@ -157,8 +149,6 @@ with tab2:
                     unsafe_allow_html=True)
 
                 raw_peers = [t for t in ind_map.get(target['Industry'], []) if t != selected_ticker]
-                
-                # If no peers found in same industry, try sector
                 if not raw_peers:
                     raw_peers = [t for t in sec_map.get(target['Sector'], []) if t != selected_ticker]
 
@@ -168,8 +158,7 @@ with tab2:
                         p_obj = yf.Ticker(t)
                         p_mcap = p_obj.info.get('marketCap', 0)
                         peer_info.append({'ticker': t, 'mcap': p_mcap})
-                    except:
-                        continue
+                    except: continue
                 
                 peer_info.sort(key=lambda x: abs(x['mcap'] - (target['Market Cap'] or 0)))
                 peer_tickers = [x['ticker'] for x in peer_info[:5]]
@@ -178,20 +167,14 @@ with tab2:
 
                 if not df_peers.empty:
                     is_fin = "Financial" in target['Sector'] or "Bank" in target['Industry']
+                    metrics = ['P/B', 'P/E', 'DivYield'] if is_fin else ['P/E', 'P/S', 'EV/EBITDA', 'EV/Rev']
 
-                    if is_fin:
-                        metrics = ['P/B', 'P/E', 'DivYield']
-                    else:
-                        metrics = ['P/E', 'P/S', 'EV/EBITDA', 'EV/Rev']
-
-                    # Cleanup data
                     for m in metrics: 
                         if m in df_peers.columns:
                             df_peers[m] = pd.to_numeric(df_peers[m], errors='coerce').replace(0, np.nan)
                     
                     stats_table = df_peers[metrics].describe(percentiles=[.25, .5, .75]).transpose()
 
-                    # Inverse Variance Weighting
                     weights, total_inv_var = {}, 0
                     for m in metrics:
                         mean_val = df_peers[m].mean()
@@ -204,81 +187,46 @@ with tab2:
                     for m in metrics: 
                         weights[m] = weights[m] / total_inv_var if total_inv_var > 0 else (1 / len(metrics))
 
-                    # Valuation Calculation
-                    debt = target.get('TotalDebt', 0) or 0
-                    cash = target.get('Cash', 0) or 0
-                    shares = target.get('SharesOut', 1) or 1
-                    
-                    # 1. P/E Value
+                    debt, cash, shares = (target.get('TotalDebt') or 0), (target.get('Cash') or 0), (target.get('SharesOut') or 1)
                     val_pe = (target['EPS'] * stats_table.loc['P/E', '50%']) if target.get('EPS') and 'P/E' in stats_table.index else 0
 
                     if is_fin:
                         val_pb = (target['BVPS'] * stats_table.loc['P/B', '50%']) if target.get('BVPS') and 'P/B' in stats_table.index else 0
                         med_yield = stats_table.loc['DivYield', '50%'] if 'DivYield' in stats_table.index else 0
                         val_div = (target['DivRate'] / med_yield) if med_yield and med_yield > 0 else 0
-                        
-                        implied_val = (val_pe * weights.get('P/E', 0)) + \
-                                      (val_pb * weights.get('P/B', 0)) + \
-                                      (val_div * weights.get('DivYield', 0))
+                        implied_val = (val_pe * weights.get('P/E', 0)) + (val_pb * weights.get('P/B', 0)) + (val_div * weights.get('DivYield', 0))
                     else:
                         val_ps = (target['RevenuePS'] * stats_table.loc['P/S', '50%']) if target.get('RevenuePS') and 'P/S' in stats_table.index else 0
-                        
-                        val_ev_ebitda = 0
-                        if target.get('EBITDA') and 'EV/EBITDA' in stats_table.index:
-                            target_ev = target['EBITDA'] * stats_table.loc['EV/EBITDA', '50%']
-                            val_ev_ebitda = (target_ev - debt + cash) / shares
-                            
-                        val_ev_rev = 0
-                        if target.get('RevenuePS') and 'EV/Rev' in stats_table.index:
-                            target_ev_rev = (target['RevenuePS'] * shares) * stats_table.loc['EV/Rev', '50%']
-                            val_ev_rev = (target_ev_rev - debt + cash) / shares
-                            
-                        implied_val = (val_pe * weights.get('P/E', 0)) + \
-                                      (val_ps * weights.get('P/S', 0)) + \
-                                      (val_ev_ebitda * weights.get('EV/EBITDA', 0)) + \
-                                      (val_ev_rev * weights.get('EV/Rev', 0))
+                        val_ev_ebitda = ((target['EBITDA'] * stats_table.loc['EV/EBITDA', '50%']) - debt + cash) / shares if target.get('EBITDA') and 'EV/EBITDA' in stats_table.index else 0
+                        val_ev_rev = (((target['RevenuePS'] * shares) * stats_table.loc['EV/Rev', '50%']) - debt + cash) / shares if target.get('RevenuePS') and 'EV/Rev' in stats_table.index else 0
+                        implied_val = (val_pe * weights.get('P/E', 0)) + (val_ps * weights.get('P/S', 0)) + (val_ev_ebitda * weights.get('EV/EBITDA', 0)) + (val_ev_rev * weights.get('EV/Rev', 0))
 
-                    # QARP adjustment
                     q_factor = 1 + (target['ROE'] - df_peers['ROE'].median()) if target.get('ROE') and not np.isnan(df_peers['ROE'].median()) else 1.0
                     final_fair_value = implied_val * q_factor
                     upside = (final_fair_value / target['Price']) - 1 if target['Price'] > 0 else 0
 
-                    # Metrics Row
                     m1, m2, m3 = st.columns(3)
                     m1.metric("Current Market Price", f"₹{target['Price']:.2f}")
                     m2.metric("Weighted Fair Value", f"₹{final_fair_value:.2f}")
                     alpha_color = "#00CC96" if upside >= 0 else "#EF553B"
-                    st.markdown(
-                        f"<style>div[data-testid='stHorizontalBlock'] > div:nth-child(3) [data-testid='stMetricValue'] > div {{color: {alpha_color} !important;}}</style>",
-                        unsafe_allow_html=True)
+                    st.markdown(f"<style>div[data-testid='stHorizontalBlock'] > div:nth-child(3) [data-testid='stMetricValue'] > div {{color: {alpha_color} !important;}}</style>", unsafe_allow_html=True)
                     m3.metric("Quant Alpha", f"{upside:.1%}", delta=f"{upside:.1%}")
 
                     st.divider()
 
-                    # Percentiles & Verdict
                     c1, c2 = st.columns([2, 1])
                     with c1:
                         st.subheader("Statistical Multiple Percentiles")
-                        st.dataframe(stats_table[['25%', '50%', '75%', 'max']].rename(columns={'50%': 'Median (Fair)'}),
-                                     use_container_width=True)
+                        st.dataframe(stats_table[['25%', '50%', '75%', 'max']].rename(columns={'50%': 'Median (Fair)'}), use_container_width=True)
 
                         with st.expander("📖 How to Read This Table"):
-                            st.markdown(f"""
-                            This table shows how companies in the peer group are valued across key metrics like {', '.join(metrics)}.
-
-                            * **25% (Lower Range):** Companies priced lower than most peers.
-                            * **Median (Fair Value):** The midpoint — reflects the typical market benchmark for fair value.
-                            * **75% (Premium Range):** Stronger companies trading at higher valuations.
-                            * **Max (Extreme Value):** The highest observed valuation in the group.
-                            """)
+                            st.markdown(f"This table benchmarks multiples like {', '.join(metrics)} against peers.")
 
                     with c2:
                         st.subheader("Institutional Verdict")
                         v_color = "#00CC96" if upside > 0.1 else "#EF553B" if upside < -0.1 else "#8b949e"
                         v_text = "ACCUMULATE" if upside > 0.1 else "TRIM" if upside < -0.1 else "HOLD/NEUTRAL"
-                        st.markdown(
-                            f"""<div class="verdict-card"><h3 style='color:{v_color}'>{v_text}</h3><p>Target is trading at a <b>{abs(upside):.1%}</b> dislocation from fair value.</p></div>""",
-                            unsafe_allow_html=True)
+                        st.markdown(f"""<div class="verdict-card"><h3 style='color:{v_color}'>{v_text}</h3><p>Target is trading at a <b>{abs(upside):.1%}</b> dislocation from fair value.</p></div>""", unsafe_allow_html=True)
 
                     st.divider()
                     st.subheader("Full Comparable Table")
@@ -291,6 +239,8 @@ with tab2:
                     st.warning("Insufficient peer data found for this specific industry.")
             else:
                 st.error("Failed to retrieve data for the selected ticker. Yahoo Finance may be blocking the connection.")
+                if st.button("🔄 Retry Data Fetch"):
+                    st.rerun()
 
 # Sidebar
 st.sidebar.title("System Status")
