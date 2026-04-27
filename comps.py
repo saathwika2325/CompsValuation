@@ -4,157 +4,293 @@ import yfinance as yf
 import datetime
 import numpy as np
 
-# 1. SETUP & THEME
+# --- Page Config ---
 st.set_page_config(page_title="COMPS : VALUATION ANALYSER", layout="wide")
 
-# Custom Styling to match your UI
+# --- Institutional Styling ---
 st.markdown("""
     <style>
     .main { background-color: #0e1117; color: white; }
-    .stSelectbox label { color: white !important; }
-    .disclaimer-box {
-        background-color: #1e1e1e;
-        border-left: 5px solid #ff4b4b;
-        padding: 15px;
-        border-radius: 5px;
-        margin-bottom: 25px;
-    }
-    .verdict-box {
-        background-color: #161b22;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #30363d;
-        height: 100%;
-    }
+    div[data-testid="stMetricValue"] { font-size: 24px; font-weight: 700; }
+    .stTabs [data-baseweb="tab-list"] { gap: 24px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; background-color: transparent; }
+    .verdict-card { padding: 20px; border-radius: 8px; border: 1px solid #30363d; background-color: #161b22; margin-top: 10px; }
+    .disclaimer-box { padding: 15px; border-radius: 5px; background-color: rgba(239, 85, 59, 0.1); border-left: 5px solid #EF553B; margin-bottom: 25px; }
+    .stock-info-card { padding: 15px; border-radius: 8px; background-color: #1c2128; border: 1px solid #444c56; margin-bottom: 20px; }
+    .stExpander { border: 1px solid #30363d !important; border-radius: 8px !important; margin-top: 10px; }
     </style>
-""", unsafe_allow_html=True)
-
-# 2. APP HEADER
-st.title("🎯 COMPS : VALUATION ANALYSER")
-
-with st.container():
-    st.markdown("""
-    <div class="disclaimer-box">
-        <p style="color: #ff4b4b; font-weight: bold; margin-bottom: 5px;">⚠️ CRITICAL LEGAL DISCLAIMER</p>
-        <ul style="font-size: 0.9em; color: #cccccc;">
-            <li>RESEARCH ONLY: Automated quantitative tool. NOT financial advice.</li>
-            <li>NO RECOMMENDATION: Ratings are mathematical outputs. Not personalized advice.</li>
-            <li>CONSULT PROFESSIONALS: Always consult registered advisors before making commitments.</li>
-        </ul>
-    </div>
     """, unsafe_allow_html=True)
 
-# 3. TABS
-tab_meth, tab_screen = st.tabs(["💡 Methodology", "🔍 Stock Screener"])
+# --- Global Universe (Expanded for Peer Discovery) ---
+STOCK_UNIVERSES = {
+    "Nifty 50": ['ADANIENT.NS', 'ADANIPORTS.NS', 'APOLLOHOSP.NS', 'ASIANPAINT.NS', 'AXISBANK.NS', 'BAJAJ-AUTO.NS',
+                 'BAJFINANCE.NS', 'BAJAJFINSV.NS', 'BPCL.NS', 'BHARTIARTL.NS', 'BRITANNIA.NS', 'CIPLA.NS',
+                 'COALINDIA.NS', 'DIVISLAB.NS', 'DRREDDY.NS', 'EICHERMOT.NS', 'GRASIM.NS', 'HCLTECH.NS', 'HDFCBANK.NS',
+                 'HDFCLIFE.NS', 'HEROMOTOCO.NS', 'HINDALCO.NS', 'HINDUNILVR.NS', 'ICICICBANK.NS', 'ITC.NS',
+                 'INDUSINDBK.NS', 'INFY.NS', 'JSWSTEEL.NS', 'KOTAKBANK.NS', 'LTIM.NS', 'LT.NS', 'M&M.NS', 'MARUTI.NS',
+                 'NTPC.NS', 'NESTLEIND.NS', 'ONGC.NS', 'POWERGRID.NS', 'RELIANCE.NS', 'SBILIFE.NS', 'SHRIRAMFIN.NS',
+                 'SBIN.NS', 'SUNPHARMA.NS', 'TCS.NS', 'TATACONSUM.NS', 'TATAMOTORS.NS', 'TATASTEEL.NS', 'TECHM.NS',
+                 'TITAN.NS', 'ULTRACEMCO.NS', 'WIPRO.NS'],
+    "Nifty Next 50": ["ABB.NS", "ADANIENSOL.NS", "ADANIGREEN.NS", "ADANIPOWER.NS", "AMBUJACEM.NS", "BAJAJHLDNG.NS",
+                      "BANKBARODA.NS", "BOSCHLTD.NS", "CANBK.NS", "CGPOWER.NS", "CHOLAFIN.NS", "COLPAL.NS", "DABUR.NS",
+                      "DLF.NS", "DMART.NS", "GAIL.NS", "GODREJCP.NS", "HAVELLS.NS", "HAL.NS", "HDFCAMC.NS",
+                      "ICICIGI.NS", "ICICIPRULI.NS", "IOC.NS", "INDIGO.NS", "NAUKRI.NS", "JINDALSTEL.NS",
+                      "JSWENERGY.NS", "LICI.NS", "MARICO.NS", "MOTHERSON.NS", "PIDILITIND.NS", "PFC.NS", "PNB.NS",
+                      "RECLTD.NS", "SHREECEM.NS", "SIEMENS.NS", "TATAPOWER.NS", "TORNTPHARM.NS", "TVSMOTOR.NS",
+                      "MCDOWELL-N.NS", "VBL.NS", "VEDL.NS", "ZYDUSLIFE.NS", "ZOMATO.NS"]
+}
 
-with tab_screen:
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        market_segment = st.selectbox("1. Select Market Segment:", ["Nifty 50", "Nifty Next 50"])
-    
-    with col2:
-        ticker_input = st.selectbox("2. Select Ticker for Analysis:", 
-                                   ["WIPRO.NS", "RELIANCE.NS", "TCS.NS", "INFY.NS", "HDFCBANK.NS"])
+GLOBAL_UNIVERSE = sorted(list(set([t for sub in STOCK_UNIVERSES.values() for t in sub])))
 
-    st.divider()
-    
-    if ticker_input:
+@st.cache_data(ttl=86400)
+def get_global_sector_map(universe):
+    ind_map, sec_map, industry_lookup = {}, {}, {}
+    # CLOUD OPTIMIZATION: On deployed apps, looping 100 times to call .info is risky.
+    # We use a progress bar so the user knows why it's slow.
+    progress_bar = st.progress(0)
+    for i, ticker in enumerate(universe):
         try:
-            with st.spinner(f"Connecting to data servers for {ticker_input}..."):
-                stock = yf.Ticker(ticker_input)
-                hist = stock.history(period="5d")
+            # We fetch a subset of info to reduce bandwidth
+            t_obj = yf.Ticker(ticker)
+            info = t_obj.info
+            ind, sec = info.get('industry', 'Other'), info.get('sector', 'Other')
+            ind_map.setdefault(ind, []).append(ticker)
+            sec_map.setdefault(sec, []).append(ticker)
+            industry_lookup[ticker] = ind
+        except:
+            continue
+        progress_bar.progress((i + 1) / len(universe))
+    progress_bar.empty()
+    return ind_map, sec_map, industry_lookup
+
+def get_valuation_data(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        # Use history for price as it's more reliable in the cloud
+        hist = stock.history(period="1d")
+        info = stock.info
+        
+        if hist.empty and not info: return None
+
+        # ROE Robust Extraction
+        roe = info.get('returnOnEquity') or info.get('trailingReturnOnEquity') or info.get('forwardReturnOnEquity')
+
+        # Fallback Math: ROE = Net Income / Equity
+        if roe is None:
+            try:
+                ni = info.get('netIncomeToCommon') or info.get('netIncome')
+                pb = info.get('priceToBook')
+                mcap = info.get('marketCap')
+                if ni and pb and mcap and pb != 0:
+                    equity = mcap / pb
+                    if equity != 0:
+                        roe = ni / equity
+            except:
+                pass
+
+        return {
+            "Ticker": ticker, "Name": info.get('shortName', ticker),
+            "Description": info.get('longBusinessSummary', "No description available."),
+            "Price": info.get('currentPrice') or info.get('previousClose') or hist['Close'].iloc[-1],
+            "P/E": info.get('forwardPE') or info.get('trailingPE'),
+            "P/S": info.get('priceToSalesTrailing12Months') or info.get('priceToSales'),
+            "P/B": info.get('priceToBook'),
+            "DivYield": info.get('dividendYield', 0),
+            "DivRate": info.get('trailingAnnualDividendRate', 0),
+            "EV/EBITDA": info.get('enterpriseToEbitda'),
+            "EV/Rev": info.get('enterpriseToRevenue'),
+            "ROE": roe, "EPS": info.get('forwardEps') or info.get('trailingEps'),
+            "BVPS": info.get('bookValue'), "RevenuePS": info.get('revenuePerShare'),
+            "EBITDA": info.get('ebitda'), "TotalDebt": info.get('totalDebt'),
+            "Cash": info.get('totalCash'), "Industry": info.get('industry', 'Other'),
+            "Sector": info.get('sector', 'Other'), "Market Cap": info.get('marketCap'),
+            "SharesOut": info.get('sharesOutstanding')
+        }
+    except Exception as e:
+        return None
+
+# --- UI Header ---
+st.title("🎯 COMPS : VALUATION ANALYSER")
+
+st.markdown("""
+<div class="disclaimer-box">
+    <b>⚠️ CRITICAL LEGAL DISCLAIMER</b><br>
+    • <b>RESEARCH ONLY:</b> Automated quantitative tool. NOT financial advice.<br>
+    • <b>NO RECOMMENDATION:</b> Ratings are mathematical outputs. Not personalized advice.<br>
+    • <b>CONSULT PROFESSIONALS:</b> Always consult registered advisors before making commitments.
+</div>
+""", unsafe_allow_html=True)
+
+tab1, tab2 = st.tabs(["💡 Methodology", "🔍 Stock Screener"])
+
+with tab1:
+    st.subheader("Quantitative Methodology")
+    st.markdown("""
+    * **Step 1: Peer Matching:** The system matches stocks strictly by Industry tag and selects the **Top 5 closest competitors** by Market Cap. 
+    * **Step 2: Multiple Benchmarking:** Pivots between models based on sector profile.
+        * **Banking/Financials:** Valuation pivots to a **Triple-Anchor Model**: P/B (Inventory Value), P/E (Earnings Yield), and Div Yield (Income Floor).
+        * **All Other Sectors:** Triangulates value using **P/E, P/S, EV/EBITDA, and EV/Revenue**.
+    * **Step 3: Statistical Weighting:** Uses **'Inverse Variance'** logic to trust stable metrics more than volatile ones.
+    * **Step 4: Quality Adjustment (QARP):** Applies premiums based on target **ROE vs sector median**.
+    * **Step 5: Quant Alpha Signaling:** Indicates the statistical dislocation between the current price and its peer-implied worth.
+    """)
+
+with tab2:
+    # On first run in cloud, this might take time. We wrap in a spinner.
+    with st.spinner("Initializing Sector Maps..."):
+        ind_map, sec_map, ind_lookup = get_global_sector_map(GLOBAL_UNIVERSE)
+        
+    col_u1, col_u2 = st.columns(2)
+    with col_u1:
+        sel_universe = st.selectbox("1. Select Market Segment:", list(STOCK_UNIVERSES.keys()))
+    with col_u2:
+        selected_ticker = st.selectbox("2. Select Ticker for Analysis:",
+                                       ["Select a Stock..."] + sorted(STOCK_UNIVERSES[sel_universe]))
+
+    if selected_ticker != "Select a Stock...":
+        with st.spinner(f"Compiling Institutional Comps..."):
+            target = get_valuation_data(selected_ticker)
+            if target:
+                st.markdown(f"## {target['Name']} ({target['Ticker']})")
+                st.markdown(
+                    f"""<div class="stock-info-card"><b>Sector:</b> {target['Sector']} | <b>Industry:</b> {target['Industry']}<br><p style='font-size:0.95em; color:#adbac7; margin-top:10px;'>{target['Description'][:500]}...</p></div>""",
+                    unsafe_allow_html=True)
+
+                raw_peers = [t for t in ind_map.get(target['Industry'], []) if t != selected_ticker]
                 
-                if hist.empty:
-                    st.error(f"Data provider returned empty results for {ticker_input}.")
-                else:
-                    current_price = round(hist['Close'].iloc[-1], 2)
-                    prev_price = hist['Close'].iloc[-2]
-                    price_change = round(((current_price - prev_price) / prev_price) * 100, 2)
-                    
-                    # Logic for Fair Value
-                    fair_value = 2447.23 if ticker_input == "TCS.NS" else round(current_price * 1.021, 2)
-                    quant_alpha = 2.1
+                # If no peers found in same industry, try sector
+                if not raw_peers:
+                    raw_peers = [t for t in sec_map.get(target['Sector'], []) if t != selected_ticker]
 
-                    # Fetch Meta Info
+                peer_info = []
+                for t in raw_peers:
                     try:
-                        info = stock.info
-                        name = info.get('longName', ticker_input)
-                        sector = info.get('sector', 'N/A')
-                        industry = info.get('industry', 'N/A')
-                        summary = info.get('longBusinessSummary', 'Description loading...')
+                        p_obj = yf.Ticker(t)
+                        p_mcap = p_obj.info.get('marketCap', 0)
+                        peer_info.append({'ticker': t, 'mcap': p_mcap})
                     except:
-                        name = ticker_input
-                        sector, industry, summary = "N/A", "N/A", "Detailed metadata currently restricted by data provider."
+                        continue
+                
+                peer_info.sort(key=lambda x: abs(x['mcap'] - (target['Market Cap'] or 0)))
+                peer_tickers = [x['ticker'] for x in peer_info[:5]]
+                peer_results = [get_valuation_data(p_t) for p_t in peer_tickers]
+                df_peers = pd.DataFrame([p for p in peer_results if p])
 
-                    # 4. RESULTS DISPLAY (TOP SECTION)
-                    st.header(f"{name.upper()} ({ticker_input})")
+                if not df_peers.empty:
+                    is_fin = "Financial" in target['Sector'] or "Bank" in target['Industry']
+
+                    if is_fin:
+                        metrics = ['P/B', 'P/E', 'DivYield']
+                    else:
+                        metrics = ['P/E', 'P/S', 'EV/EBITDA', 'EV/Rev']
+
+                    # Cleanup data
+                    for m in metrics: 
+                        if m in df_peers.columns:
+                            df_peers[m] = pd.to_numeric(df_peers[m], errors='coerce').replace(0, np.nan)
                     
-                    st.markdown(f"""
-                    <div style="background-color: #161b22; padding: 20px; border-radius: 10px; margin-bottom: 20px; border: 1px solid #30363d;">
-                        <p style="color: #8b949e; font-weight: bold;">Sector: <span style="color: white;">{sector}</span> | Industry: <span style="color: white;">{industry}</span></p>
-                        <p style="font-size: 0.9em; color: #8b949e;">{summary[:400]}...</p>
-                    </div>
-                    """, unsafe_allow_html=True)
+                    stats_table = df_peers[metrics].describe(percentiles=[.25, .5, .75]).transpose()
+
+                    # Inverse Variance Weighting
+                    weights, total_inv_var = {}, 0
+                    for m in metrics:
+                        mean_val = df_peers[m].mean()
+                        std_val = df_peers[m].std()
+                        cv = std_val / mean_val if mean_val and not np.isnan(std_val) else 1
+                        inv_var = 1 / (cv ** 2) if cv != 0 else 0
+                        weights[m] = inv_var
+                        total_inv_var += inv_var
                     
-                    m_col1, m_col2, m_col3 = st.columns(3)
-                    with m_col1:
-                        st.metric("Current Market Price", f"₹{current_price}", f"{price_change}%")
-                    with m_col2:
-                        st.metric("Weighted Fair Value", f"₹{fair_value}")
-                    with m_col3:
-                        st.metric("Quant Alpha", f"{quant_alpha}%", f"{quant_alpha}%")
+                    for m in metrics: 
+                        weights[m] = weights[m] / total_inv_var if total_inv_var > 0 else (1 / len(metrics))
 
-                    st.divider()
+                    # Valuation Calculation
+                    debt = target.get('TotalDebt', 0) or 0
+                    cash = target.get('Cash', 0) or 0
+                    shares = target.get('SharesOut', 1) or 1
+                    
+                    # 1. P/E Value
+                    val_pe = (target['EPS'] * stats_table.loc['P/E', '50%']) if target.get('EPS') and 'P/E' in stats_table.index else 0
 
-                    # 5. MISSING DATA SECTIONS (STATISTICAL PERCENTILES & VERDICT)
-                    v_col1, v_col2 = st.columns([2, 1])
-
-                    with v_col1:
-                        st.subheader("Statistical Multiple Percentiles")
-                        # Mock data based on your screenshot
-                        percentile_data = {
-                            "25%": [14.49, 3.25, 12.69, 2.97],
-                            "Median (Fair)": [15.01, 3.26, 17.77, 3.12],
-                            "75%": [15.98, 221.87, 1054.63, 221.83],
-                            "max": [21.30, 231.82, 1122.47, 231.67]
-                        }
-                        df_percentiles = pd.DataFrame(percentile_data, index=["P/E", "P/S", "EV/EBITDA", "EV/Rev"])
-                        st.table(df_percentiles)
+                    if is_fin:
+                        val_pb = (target['BVPS'] * stats_table.loc['P/B', '50%']) if target.get('BVPS') and 'P/B' in stats_table.index else 0
+                        med_yield = stats_table.loc['DivYield', '50%'] if 'DivYield' in stats_table.index else 0
+                        val_div = (target['DivRate'] / med_yield) if med_yield and med_yield > 0 else 0
                         
-                        with st.expander("📂 How to Read This Table"):
-                            st.write("This table shows where the current stock's multiples sit relative to its peer group. The Median (Fair) represents the estimated fair multiple.")
+                        implied_val = (val_pe * weights.get('P/E', 0)) + \
+                                      (val_pb * weights.get('P/B', 0)) + \
+                                      (val_div * weights.get('DivYield', 0))
+                    else:
+                        val_ps = (target['RevenuePS'] * stats_table.loc['P/S', '50%']) if target.get('RevenuePS') and 'P/S' in stats_table.index else 0
+                        
+                        val_ev_ebitda = 0
+                        if target.get('EBITDA') and 'EV/EBITDA' in stats_table.index:
+                            target_ev = target['EBITDA'] * stats_table.loc['EV/EBITDA', '50%']
+                            val_ev_ebitda = (target_ev - debt + cash) / shares
+                            
+                        val_ev_rev = 0
+                        if target.get('RevenuePS') and 'EV/Rev' in stats_table.index:
+                            target_ev_rev = (target['RevenuePS'] * shares) * stats_table.loc['EV/Rev', '50%']
+                            val_ev_rev = (target_ev_rev - debt + cash) / shares
+                            
+                        implied_val = (val_pe * weights.get('P/E', 0)) + \
+                                      (val_ps * weights.get('P/S', 0)) + \
+                                      (val_ev_ebitda * weights.get('EV/EBITDA', 0)) + \
+                                      (val_ev_rev * weights.get('EV/Rev', 0))
 
-                    with v_col2:
-                        st.subheader("Institutional Verdict")
-                        st.markdown(f"""
-                        <div class="verdict-box">
-                            <h2 style="color: #8b949e; margin-top: 0;">HOLD/NEUTRAL</h2>
-                            <p style="font-size: 1.1em;">Target is trading at a <b>{quant_alpha}% dislocation</b> from fair value.</p>
-                        </div>
-                        """, unsafe_allow_html=True)
+                    # QARP adjustment
+                    q_factor = 1 + (target['ROE'] - df_peers['ROE'].median()) if target.get('ROE') and not np.isnan(df_peers['ROE'].median()) else 1.0
+                    final_fair_value = implied_val * q_factor
+                    upside = (final_fair_value / target['Price']) - 1 if target['Price'] > 0 else 0
+
+                    # Metrics Row
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Current Market Price", f"₹{target['Price']:.2f}")
+                    m2.metric("Weighted Fair Value", f"₹{final_fair_value:.2f}")
+                    alpha_color = "#00CC96" if upside >= 0 else "#EF553B"
+                    st.markdown(
+                        f"<style>div[data-testid='stHorizontalBlock'] > div:nth-child(3) [data-testid='stMetricValue'] > div {{color: {alpha_color} !important;}}</style>",
+                        unsafe_allow_html=True)
+                    m3.metric("Quant Alpha", f"{upside:.1%}", delta=f"{upside:.1%}")
 
                     st.divider()
 
-                    # 6. FULL COMPARABLE TABLE
-                    st.subheader("Full Comparable Table")
-                    # Peer data based on your screenshot
-                    peer_data = {
-                        "Name": ["LTIMINDTREE LIMITED", "TECH MAHINDRA LIMITED", "HCL TECHNOLOGIES LTD", "INFOSYS LIMITED", "TATA CONSULTANCY SERV LT"],
-                        "P/E": [21.3, 16.0, 15.0, 14.1, 14.5],
-                        "P/S": [3.3, 2.1, 221.9, 231.8, 3.3],
-                        "EV/EBITDA": [17.8, 12.7, 1122.5, 1054.6, 11.5],
-                        "EV/Rev": [2.97, 2.02, 221.83, 231.66, 3.12],
-                        "Market Cap": ["1,335,159,685,120", "1,206,646,996,992", "3,253,547,040,768", "4,673,058,635,776", "8,687,028,011,008"],
-                        "ROE": ["21.0%", "16.6%", "23.4%", "31.4%", "48.4%"]
-                    }
-                    df_peers = pd.DataFrame(peer_data)
-                    st.dataframe(df_peers, use_container_width=True, hide_index=True)
+                    # Percentiles & Verdict
+                    c1, c2 = st.columns([2, 1])
+                    with c1:
+                        st.subheader("Statistical Multiple Percentiles")
+                        st.dataframe(stats_table[['25%', '50%', '75%', 'max']].rename(columns={'50%': 'Median (Fair)'}),
+                                     use_container_width=True)
 
-        except Exception as e:
-            st.error("⚠️ Data connection failed.")
-            with st.expander("Show Technical Logs"):
-                st.write(f"Error: {str(e)}")
+                        with st.expander("📖 How to Read This Table"):
+                            st.markdown(f"""
+                            This table shows how companies in the peer group are valued across key metrics like {', '.join(metrics)}.
+
+                            * **25% (Lower Range):** Companies priced lower than most peers.
+                            * **Median (Fair Value):** The midpoint — reflects the typical market benchmark for fair value.
+                            * **75% (Premium Range):** Stronger companies trading at higher valuations.
+                            * **Max (Extreme Value):** The highest observed valuation in the group.
+                            """)
+
+                    with c2:
+                        st.subheader("Institutional Verdict")
+                        v_color = "#00CC96" if upside > 0.1 else "#EF553B" if upside < -0.1 else "#8b949e"
+                        v_text = "ACCUMULATE" if upside > 0.1 else "TRIM" if upside < -0.1 else "HOLD/NEUTRAL"
+                        st.markdown(
+                            f"""<div class="verdict-card"><h3 style='color:{v_color}'>{v_text}</h3><p>Target is trading at a <b>{abs(upside):.1%}</b> dislocation from fair value.</p></div>""",
+                            unsafe_allow_html=True)
+
+                    st.divider()
+                    st.subheader("Full Comparable Table")
+                    available_cols = ['Name'] + [m for m in metrics if m in df_peers.columns] + ['Market Cap', 'ROE']
+                    st.dataframe(df_peers[available_cols].style.format({
+                        'P/E': '{:.1f}', 'P/B': '{:.2f}', 'P/S': '{:.1f}', 'EV/EBITDA': '{:.1f}', 'EV/Rev': '{:.2f}',
+                        'DivYield': '{:.2%}', 'ROE': '{:.1%}', 'Market Cap': '{:,.0f}'
+                    }, na_rep='N/A'), hide_index=True, use_container_width=True)
+                else:
+                    st.warning("Insufficient peer data found for this specific industry.")
+            else:
+                st.error("Failed to retrieve data for the selected ticker. Yahoo Finance may be blocking the connection.")
 
 # Sidebar
 st.sidebar.title("System Status")
